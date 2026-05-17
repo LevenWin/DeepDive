@@ -1,156 +1,101 @@
 import { ref, computed } from 'vue'
-import { useAPI } from './useAPI.js'
 
-const ACTIVE_THREAD_KEY = 'deepdive-active-thread'
+const STORAGE_KEY = 'deepdive-threads'
 
-const threads = ref([])
-const activeThreadId = ref(localStorage.getItem(ACTIVE_THREAD_KEY) || null)
+const threads = ref(loadThreads())
+const activeThreadId = ref(localStorage.getItem('deepdive-active-thread') || null)
 const treeVersion = ref(0)
-const threadsLoaded = ref(false)
 
 function bumpTree() { treeVersion.value++ }
 
-function rowToThread(row, conceptRows = []) {
-  const concepts = {}
-  const tree = { root: [] }
+function generateId() {
+  return 't_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
+}
 
-  for (const c of conceptRows) {
-    concepts[c.slug] = {
-      slug: c.slug,
-      title: c.title,
-      content: c.content || '',
-      summary: c.summary || '',
-      relatedConcepts: c.relatedConcepts || [],
-      difficulty: c.difficulty || '通俗',
-      parentSlug: c.parentSlug || null,
-      createdAt: new Date(c.createdAt).getTime(),
-    }
-    const parent = c.parentSlug || 'root'
-    if (!tree[parent]) tree[parent] = []
-    if (!tree[parent].includes(c.slug)) tree[parent].push(c.slug)
-    if (!tree[c.slug]) tree[c.slug] = []
-  }
-
-  if (!tree.root.includes(row.rootSlug)) {
-    tree.root.push(row.rootSlug)
-  }
-  if (!concepts[row.rootSlug]) {
-    concepts[row.rootSlug] = {
-      slug: row.rootSlug,
-      title: row.rootTitle,
-      content: '',
-      summary: '',
-      relatedConcepts: [],
-      difficulty: '通俗',
-      parentSlug: null,
-      createdAt: new Date(row.createdAt).getTime(),
-    }
-  }
-
-  return {
-    threadId: row.id,
-    rootSlug: row.rootSlug,
-    rootTitle: row.rootTitle,
-    currentSlug: row.currentSlug || row.rootSlug,
-    categoryId: row.categoryId || null,
-    isFavorite: !!row.isFavorite,
-    tree,
-    concepts,
-    createdAt: new Date(row.createdAt).getTime(),
-    updatedAt: new Date(row.updatedAt).getTime(),
+function loadThreads() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
+    return raw.filter((t) => t.rootSlug && t.rootSlug.length > 0)
+  } catch {
+    return []
   }
 }
 
-export function useThread() {
-  const api = useAPI()
+function saveThreads() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(threads.value))
+}
 
+export function useThread() {
   const activeThread = computed(() =>
     threads.value.find((t) => t.threadId === activeThreadId.value) || null,
   )
 
-  async function loadThreadsList() {
-    const rows = await api.getThreads()
-    threads.value = rows
-      .map((r) => rowToThread(r, []))
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-    threadsLoaded.value = true
-    bumpTree()
-  }
-
-  async function loadThreadDetail(threadId) {
-    const row = await api.getThread(threadId)
-    const existingIdx = threads.value.findIndex((t) => t.threadId === threadId)
-    const hydrated = rowToThread(row, row.concepts || [])
-    if (existingIdx >= 0) {
-      threads.value[existingIdx] = hydrated
-    } else {
-      threads.value.unshift(hydrated)
+  function createThread(rootSlug, rootTitle, conceptData) {
+    if (!rootSlug) rootSlug = 'root-' + Date.now().toString(36)
+    const threadId = generateId()
+    const thread = {
+      threadId,
+      rootSlug,
+      rootTitle,
+      tree: { root: [rootSlug] },
+      concepts: {},
+      currentSlug: rootSlug,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
     }
-    bumpTree()
-    return hydrated
-  }
-
-  function setActiveThread(threadId) {
+    if (conceptData) thread.concepts[rootSlug] = conceptData
+    threads.value.unshift(thread)
     activeThreadId.value = threadId
-    if (threadId) localStorage.setItem(ACTIVE_THREAD_KEY, threadId)
-    else localStorage.removeItem(ACTIVE_THREAD_KEY)
+    localStorage.setItem('deepdive-active-thread', threadId)
+    saveThreads()
+    bumpTree()
+    return thread
   }
 
-  function ingestConceptFromServer(threadId, parentSlug, conceptRow) {
-    const thread = threads.value.find((t) => t.threadId === threadId)
-    if (!thread) return
-    const slug = conceptRow.slug
+  function switchThread(threadId) {
+    activeThreadId.value = threadId
+    localStorage.setItem('deepdive-active-thread', threadId)
+  }
 
-    thread.concepts[slug] = {
-      slug,
-      title: conceptRow.title || slug,
-      content: conceptRow.content || '',
-      summary: conceptRow.summary || '',
-      relatedConcepts: conceptRow.relatedConcepts || [],
-      difficulty: conceptRow.difficulty || '通俗',
-      parentSlug: parentSlug || null,
-      createdAt: thread.concepts[slug]?.createdAt || Date.now(),
+  function addConceptToTree(parentSlug, childSlug, childTitle, conceptData) {
+    const thread = activeThread.value
+    if (!thread || !childSlug) return
+    if (!parentSlug) parentSlug = 'root'
+    if (parentSlug === childSlug) return
+
+    if (!thread.tree[parentSlug]) thread.tree[parentSlug] = []
+    if (!thread.tree[parentSlug].includes(childSlug)) thread.tree[parentSlug].push(childSlug)
+    if (!thread.tree[childSlug]) thread.tree[childSlug] = []
+
+    thread.concepts[childSlug] = conceptData || {
+      slug: childSlug,
+      title: childTitle || childSlug,
+      content: '',
+      relatedConcepts: [],
+      difficulty: '通俗',
+      createdAt: Date.now(),
     }
 
-    const parentKey = parentSlug || 'root'
-    if (!thread.tree[parentKey]) thread.tree[parentKey] = []
-    if (parentKey !== slug && !thread.tree[parentKey].includes(slug)) {
-      thread.tree[parentKey].push(slug)
-    }
-    if (!thread.tree[slug]) thread.tree[slug] = []
-
-    thread.currentSlug = slug
+    thread.currentSlug = childSlug
     thread.updatedAt = Date.now()
+    saveThreads()
     bumpTree()
   }
 
-  function placeholderConcept(slug, title, parentSlug) {
+  function cacheConceptData(slug, data) {
     const thread = activeThread.value
     if (!thread) return
-    if (!thread.concepts[slug]) {
-      thread.concepts[slug] = {
-        slug,
-        title: title || slug,
-        content: '',
-        summary: '',
-        relatedConcepts: [],
-        difficulty: '通俗',
-        parentSlug: parentSlug || null,
-        createdAt: Date.now(),
-      }
-    }
-    const parentKey = parentSlug || 'root'
-    if (!thread.tree[parentKey]) thread.tree[parentKey] = []
-    if (parentKey !== slug && !thread.tree[parentKey].includes(slug)) {
-      thread.tree[parentKey].push(slug)
-    }
-    if (!thread.tree[slug]) thread.tree[slug] = []
-    bumpTree()
+    thread.concepts[slug] = { ...thread.concepts[slug], ...data }
+    thread.updatedAt = Date.now()
+    saveThreads()
   }
 
-  async function switchThread(threadId) {
-    setActiveThread(threadId)
-    await loadThreadDetail(threadId)
+  function getCachedConcept(slug) {
+    return activeThread.value?.concepts?.[slug] || null
+  }
+
+  function getAllCachedConcepts() {
+    return activeThread.value?.concepts || {}
   }
 
   function navigateToSlug(slug) {
@@ -158,16 +103,7 @@ export function useThread() {
     if (!thread) return
     thread.currentSlug = slug
     thread.updatedAt = Date.now()
-  }
-
-  function getCachedConcept(slug) {
-    return activeThread.value?.concepts?.[slug] || null
-  }
-
-  function getChildren(slug) {
-    const thread = activeThread.value
-    if (!thread) return []
-    return thread.tree[slug] || []
+    saveThreads()
   }
 
   function getConceptPathToRoot(slug) {
@@ -190,48 +126,64 @@ export function useThread() {
     return path
   }
 
-  function clearActiveThread() {
-    setActiveThread(null)
+  function getChildren(slug) {
+    const thread = activeThread.value
+    if (!thread) return []
+    return thread.tree[slug] || []
   }
 
-  async function deleteThread(threadId) {
-    try { await api.deleteThread(threadId) } catch (e) {}
-    threads.value = threads.value.filter((t) => t.threadId !== threadId)
-    if (activeThreadId.value === threadId) {
-      setActiveThread(null)
+  function isConceptInTree(slug) {
+    return !!activeThread.value?.concepts[slug]
+  }
+
+  function removeConceptFromTree(slug) {
+    const thread = activeThread.value
+    if (!thread) return
+    for (const [, children] of Object.entries(thread.tree)) {
+      const idx = children.indexOf(slug)
+      if (idx !== -1) { children.splice(idx, 1); break }
     }
-  }
-
-  function threadCount() {
-    return threads.value.length
-  }
-
-  function resetAll() {
-    threads.value = []
-    threadsLoaded.value = false
-    setActiveThread(null)
+    delete thread.tree[slug]
+    delete thread.concepts[slug]
+    saveThreads()
     bumpTree()
   }
+
+  function clearActiveThread() {
+    activeThreadId.value = null
+    localStorage.removeItem('deepdive-active-thread')
+  }
+
+  function deleteThread(threadId) {
+    threads.value = threads.value.filter((t) => t.threadId !== threadId)
+    if (activeThreadId.value === threadId) {
+      activeThreadId.value = null
+      localStorage.removeItem('deepdive-active-thread')
+    }
+    saveThreads()
+  }
+
+  function threadCount() { return threads.value.length }
 
   return {
     threads,
     activeThreadId,
     activeThread,
-    threadsLoaded,
     treeVersion,
-    loadThreadsList,
-    loadThreadDetail,
-    setActiveThread,
+    createThread,
     switchThread,
-    ingestConceptFromServer,
-    placeholderConcept,
-    navigateToSlug,
+    addConceptToTree,
+    cacheConceptData,
     getCachedConcept,
-    getChildren,
+    getAllCachedConcepts,
+    navigateToSlug,
     getConceptPathToRoot,
+    getChildren,
+    isConceptInTree,
+    removeConceptFromTree,
     clearActiveThread,
     deleteThread,
     threadCount,
-    resetAll,
+    saveThreads,
   }
 }

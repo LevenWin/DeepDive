@@ -1,6 +1,7 @@
 <script setup>
 import { ref, reactive, onMounted, watch } from 'vue'
-import { useAPI } from '../composables/useAPI.js'
+import { useDeepSeek } from '../composables/useDeepSeek.js'
+import { useLocalDB } from '../composables/useLocalDB.js'
 import { useThread } from '../composables/useThread.js'
 import { useToast } from '../composables/useToast.js'
 import { searchQuery } from '../composables/useSearchEvent.js'
@@ -11,17 +12,16 @@ import ContextMenu from './ContextMenu.vue'
 import HistoryPanel from './HistoryPanel.vue'
 import { useTheme } from '../composables/useTheme.js'
 
-const emit = defineEmits(['new-explore'])
-
 const { theme, toggle } = useTheme()
 const { show: toast } = useToast()
-const api = useAPI()
+
+const { fetchConcept } = useDeepSeek()
+const { saveThreadConcept, getThreadConcepts, deleteThreadConcepts } = useLocalDB()
 const {
   threads, activeThreadId, activeThread,
-  loadThreadsList, loadThreadDetail,
-  setActiveThread, switchThread,
-  ingestConceptFromServer, placeholderConcept,
-  navigateToSlug, getCachedConcept, deleteThread, clearActiveThread,
+  createThread, switchThread, addConceptToTree,
+  cacheConceptData, getCachedConcept,
+  navigateToSlug, deleteThread, clearActiveThread,
 } = useThread()
 
 const currentConcept = ref(null)
@@ -39,26 +39,17 @@ watch(() => searchQuery.value, (query) => {
 })
 
 onMounted(async () => {
-  try { await loadThreadsList() } catch (e) {
-    console.warn('[ConceptPage] loadThreadsList failed:', e.message)
-  }
-
   if (activeThread.value) {
-    loading.value = true
-    try {
-      await loadThreadDetail(activeThread.value.threadId)
-      const slug = activeThread.value.currentSlug
-      const cached = getCachedConcept(slug)
-      if (cached?.content) {
-        currentConcept.value = cached
+    await restoreFromIndexedDB(activeThread.value.threadId)
+    const cached = getCachedConcept(activeThread.value.currentSlug)
+    if (cached?.content) {
+      currentConcept.value = cached
+    } else {
+      currentConcept.value = cached || { title: activeThread.value.currentSlug }
+      loading.value = true
+      try { await loadConceptBySlug(activeThread.value.currentSlug) } catch (e) {
         loading.value = false
-      } else {
-        currentConcept.value = cached || { title: slug, slug }
-        await loadConceptBySlug(slug, cached?.parentSlug || null)
       }
-    } catch (e) {
-      console.error('[ConceptPage] mount restore failed:', e.message)
-      loading.value = false
     }
   }
 })
@@ -66,36 +57,72 @@ onMounted(async () => {
 function markLoading(slug) { loadingSlugs.add(slug) }
 function unmarkLoading(slug) { loadingSlugs.delete(slug) }
 
-async function callFetchConcept({ conceptName, threadId, parentSlug }) {
-  return api.fetchConcept(conceptName, threadId, parentSlug)
+function getFetchOptions() {
+  const parent = currentConcept.value
+  if (parent?.summary) return { difficulty: '通俗', parentSummary: parent.summary }
+  if (parent?.content) return { difficulty: '通俗', parentSummary: parent.content.slice(0, 300) }
+  return { difficulty: '通俗' }
+}
+
+function persistConceptAsync(slug, data) {
+  const thread = activeThread.value
+  if (!thread) return
+  saveThreadConcept(thread.threadId, slug, data).catch(() => {})
+}
+
+async function restoreFromIndexedDB(threadId) {
+  try {
+    const concepts = await getThreadConcepts(threadId)
+    for (const [slug, data] of Object.entries(concepts)) {
+      cacheConceptData(slug, data)
+    }
+  } catch (e) {}
 }
 
 async function handleNewSearch(conceptName) {
   error.value = ''
   loading.value = true
-  currentConcept.value = { title: conceptName, slug: generateSlug(conceptName) }
+  const slug = generateSlug(conceptName)
+
+  createThread(slug, conceptName, {
+    slug, title: conceptName, content: '', summary: '',
+    relatedConcepts: [], difficulty: '通俗', createdAt: Date.now(),
+  })
+  currentConcept.value = getCachedConcept(slug)
 
   try {
-    const { thread, concept } = await callFetchConcept({ conceptName })
-    await loadThreadDetail(thread.id)
-    setActiveThread(thread.id)
-    ingestConceptFromServer(thread.id, null, concept)
-    currentConcept.value = getCachedConcept(concept.slug)
+    const result = await fetchConcept(conceptName, { difficulty: '通俗' })
+    const data = { ...result, slug, difficulty: '通俗', createdAt: Date.now() }
+    cacheConceptData(slug, data)
+    currentConcept.value = data
     loading.value = false
+    persistConceptAsync(slug, data)
+
+    if (result.relatedConcepts?.length) {
+      for (const rc of result.relatedConcepts) {
+        cacheConceptData(rc.slug, {
+          slug: rc.slug, title: rc.term, content: '', summary: rc.summary || '',
+          relatedConcepts: [], difficulty: '通俗', createdAt: Date.now(),
+        })
+      }
+    }
   } catch (e) {
-    error.value = e.message || '加载失败'
-    toast(error.value, 'error')
+    const msg = e.message === 'API_KEY_MISSING' ? '请先设置 DeepSeek API Key'
+      : e.name === 'AbortError' ? '请求超时，请检查网络后重试'
+      : (e.message || '加载失败')
+    error.value = msg
+    toast(msg, 'error')
     loading.value = false
   }
 }
 
-async function loadConceptBySlug(slug, parentSlug = null) {
+async function loadConceptBySlug(slug) {
   const thread = activeThread.value
   if (!thread) return
 
   const cached = getCachedConcept(slug)
   if (cached?.content) {
-    if (thread.currentSlug === slug) {
+    if (activeThread.value.currentSlug === slug) {
       currentConcept.value = cached
       loading.value = false
     }
@@ -103,24 +130,37 @@ async function loadConceptBySlug(slug, parentSlug = null) {
     return
   }
 
-  const title = cached?.title || slug
-  const effectiveParent = parentSlug ?? cached?.parentSlug ?? null
   try {
-    const { concept } = await callFetchConcept({
-      conceptName: title,
-      threadId: thread.threadId,
-      parentSlug: effectiveParent,
-    })
-    ingestConceptFromServer(thread.threadId, effectiveParent, concept)
+    const concept = thread.concepts[slug]
+    const title = concept?.title || slug
+    const result = await fetchConcept(title, getFetchOptions())
+    const data = { ...result, slug, difficulty: '通俗', createdAt: Date.now() }
+    cacheConceptData(slug, data)
 
     if (activeThread.value.currentSlug === slug) {
-      currentConcept.value = getCachedConcept(slug)
+      currentConcept.value = data
       loading.value = false
     }
+
+    persistConceptAsync(slug, data)
+
+    if (result.relatedConcepts?.length) {
+      for (const rc of result.relatedConcepts) {
+        if (!thread.concepts[rc.slug]) {
+          cacheConceptData(rc.slug, {
+            slug: rc.slug, title: rc.term, content: '', summary: rc.summary || '',
+            relatedConcepts: [], difficulty: '通俗', createdAt: Date.now(),
+          })
+        }
+      }
+    }
   } catch (e) {
+    const msg = e.message === 'API_KEY_MISSING' ? '请先设置 DeepSeek API Key'
+      : e.name === 'AbortError' ? '请求超时，请检查网络后重试'
+      : (e.message || '加载失败')
     if (activeThread.value?.currentSlug === slug) {
-      error.value = e.message || '加载失败'
-      toast(error.value, 'error')
+      error.value = msg
+      toast(msg, 'error')
       loading.value = false
     }
   } finally {
@@ -132,8 +172,8 @@ async function handleConceptClick({ slug, term }) {
   const thread = activeThread.value
   if (!thread) return
 
-  const parentSlug = currentConcept.value?.slug || thread.rootSlug
-  placeholderConcept(slug, term, parentSlug)
+  const parentSlug = currentConcept.value?.slug
+  addConceptToTree(parentSlug || 'root', slug, term, thread.concepts[slug] || null)
   navigateToSlug(slug)
 
   const cached = getCachedConcept(slug)
@@ -146,7 +186,7 @@ async function handleConceptClick({ slug, term }) {
   currentConcept.value = cached || { title: term, slug }
   loading.value = true
   markLoading(slug)
-  await loadConceptBySlug(slug, parentSlug)
+  try { await loadConceptBySlug(slug) } catch (e) { loading.value = false }
 }
 
 async function handleContextMenuAsk(text) {
@@ -155,36 +195,35 @@ async function handleContextMenuAsk(text) {
   const slug = generateSlug(text)
   const parentSlug = currentConcept.value?.slug || thread.rootSlug
 
-  placeholderConcept(slug, text, parentSlug)
+  addConceptToTree(parentSlug, slug, text)
   navigateToSlug(slug)
+
   currentConcept.value = getCachedConcept(slug) || { title: text, slug }
   loading.value = true
   markLoading(slug)
-  await loadConceptBySlug(slug, parentSlug)
+  try { await loadConceptBySlug(slug) } catch (e) { loading.value = false }
 }
 
 async function handleRegenerate() {
   if (!currentConcept.value) return
-  const thread = activeThread.value
-  if (!thread) return
   const title = currentConcept.value.title
   const slug = currentConcept.value.slug
-  const parentSlug = currentConcept.value.parentSlug || null
+  const thread = activeThread.value
+  if (!thread) return
 
   loading.value = true
   error.value = ''
   try {
-    const { concept } = await callFetchConcept({
-      conceptName: title,
-      threadId: thread.threadId,
-      parentSlug,
-    })
-    ingestConceptFromServer(thread.threadId, parentSlug, concept)
-    currentConcept.value = getCachedConcept(slug)
+    const result = await fetchConcept(title, { difficulty: '通俗' })
+    const data = { ...result, slug, difficulty: '通俗', createdAt: Date.now() }
+    cacheConceptData(slug, data)
+    currentConcept.value = data
     loading.value = false
+    persistConceptAsync(slug, data)
   } catch (e) {
-    error.value = e.message || '重新生成失败'
-    toast(error.value, 'error')
+    const msg = e.name === 'AbortError' ? '请求超时，请检查网络后重试' : (e.message || '重新生成失败')
+    error.value = msg
+    toast(msg, 'error')
     loading.value = false
   }
 }
@@ -202,38 +241,50 @@ function handleNewExplore() {
   currentConcept.value = null
   loading.value = false
   error.value = ''
-  emit('new-explore')
 }
 
 async function handleThreadSwitch(threadId) {
-  if (activeThreadId.value === threadId) return
-  setActiveThread(threadId)
+  const oldId = activeThreadId.value
+  if (oldId === threadId) return
+
+  if (activeThread.value && activeThread.value.threadId === oldId) {
+    const oldConcepts = { ...activeThread.value.concepts }
+    ;(async () => {
+      for (const [slug, data] of Object.entries(oldConcepts)) {
+        if (data.content) {
+          try { await saveThreadConcept(oldId, slug, data) } catch (e) {}
+        }
+      }
+    })()
+  }
+
+  switchThread(threadId)
   loading.value = true
   error.value = ''
-  try {
-    const thread = await loadThreadDetail(threadId)
-    const slug = thread.currentSlug || thread.rootSlug
-    navigateToSlug(slug)
-    const cached = getCachedConcept(slug)
-    if (cached?.content) {
-      currentConcept.value = cached
-      loading.value = false
-    } else {
-      currentConcept.value = cached || { title: slug, slug }
-      await loadConceptBySlug(slug, cached?.parentSlug || null)
-    }
-  } catch (e) {
-    error.value = e.message || '切换失败'
-    toast(error.value, 'error')
+
+  const thread = threads.value.find((t) => t.threadId === threadId)
+  if (!thread) { loading.value = false; return }
+
+  await restoreFromIndexedDB(threadId)
+  const slug = thread.rootSlug
+  navigateToSlug(slug)
+
+  const cached = getCachedConcept(slug)
+  if (cached?.content) {
+    currentConcept.value = cached
     loading.value = false
+  } else {
+    currentConcept.value = cached || { title: slug }
+    try { await loadConceptBySlug(slug) } catch (e) { loading.value = false }
   }
 }
 
 async function handleThreadDelete(threadId) {
   const wasActive = activeThreadId.value === threadId
-  await deleteThread(threadId)
+  deleteThread(threadId)
+  deleteThreadConcepts(threadId).catch(() => {})
   if (wasActive) {
-    const remaining = threads.value
+    const remaining = threads.value.filter((t) => t.rootSlug)
     if (remaining.length > 0) {
       await handleThreadSwitch(remaining[0].threadId)
     } else {
@@ -253,7 +304,7 @@ async function handlePathNodeClick(slug) {
   currentConcept.value = cached || { title: slug, slug }
   loading.value = true
   markLoading(slug)
-  await loadConceptBySlug(slug, cached?.parentSlug || null)
+  try { await loadConceptBySlug(slug) } catch (e) { loading.value = false }
 }
 </script>
 
@@ -296,7 +347,7 @@ async function handlePathNodeClick(slug) {
         <button
           class="text-xs px-2.5 py-1.5 rounded-lg transition-colors"
           :class="'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'"
-          @click="handleNewExplore"
+          @click="$emit('new-explore')"
         >
           新探索
         </button>
