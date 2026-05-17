@@ -1,5 +1,7 @@
 # DeepDive — 架构与设计规范
 
+> **Live Demo**：[https://deepdive-7d8.pages.dev/](https://deepdive-7d8.pages.dev/)（`local-only` 分支，Cloudflare Pages 托管）
+
 ## 项目概览
 
 AI 驱动的深度知识探索工具，基于 DeepSeek Chat API，支持树形知识路径导航。
