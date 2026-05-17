@@ -11,6 +11,7 @@
 ## 截图
 
 桌面端三栏布局：左侧探索路径树 · 中间 AI 生成正文（关键术语高亮可点击）· 右侧历史。
+<img width="1920" height="959" alt="QQ20260517-154629" src="https://github.com/user-attachments/assets/e8c556d0-ffdd-4bd8-a121-afcf8689b922" />
 
 ---
 
