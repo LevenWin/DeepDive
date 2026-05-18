@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, reactive, onMounted, watch, computed } from 'vue'
 import { useDeepSeek } from '../composables/useDeepSeek.js'
 import { useLocalDB } from '../composables/useLocalDB.js'
 import { useThread } from '../composables/useThread.js'
@@ -22,9 +22,15 @@ const {
   createThread, switchThread, addConceptToTree,
   cacheConceptData, getCachedConcept,
   navigateToSlug, deleteThread, clearActiveThread,
+  getConceptPathToRoot, removeConceptFromTree,
 } = useThread()
 
 const currentConcept = ref(null)
+const isCurrentDeletable = computed(() => {
+  const thread = activeThread.value
+  const slug = currentConcept.value?.slug
+  return thread && slug && slug !== thread.rootSlug
+})
 const loading = ref(false)
 const error = ref('')
 const sidebarOpen = ref(false)
@@ -57,11 +63,13 @@ onMounted(async () => {
 function markLoading(slug) { loadingSlugs.add(slug) }
 function unmarkLoading(slug) { loadingSlugs.delete(slug) }
 
-function getFetchOptions() {
+function getFetchOptions(userPrompt) {
+  const opts = { difficulty: '通俗' }
+  if (userPrompt) opts.userPrompt = userPrompt
   const parent = currentConcept.value
-  if (parent?.summary) return { difficulty: '通俗', parentSummary: parent.summary }
-  if (parent?.content) return { difficulty: '通俗', parentSummary: parent.content.slice(0, 300) }
-  return { difficulty: '通俗' }
+  if (parent?.summary) opts.parentSummary = parent.summary
+  else if (parent?.content) opts.parentSummary = parent.content.slice(0, 300)
+  return opts
 }
 
 function persistConceptAsync(slug, data) {
@@ -116,7 +124,7 @@ async function handleNewSearch(conceptName) {
   }
 }
 
-async function loadConceptBySlug(slug) {
+async function loadConceptBySlug(slug, userPrompt) {
   const thread = activeThread.value
   if (!thread) return
 
@@ -133,7 +141,7 @@ async function loadConceptBySlug(slug) {
   try {
     const concept = thread.concepts[slug]
     const title = concept?.title || slug
-    const result = await fetchConcept(title, getFetchOptions())
+    const result = await fetchConcept(title, getFetchOptions(userPrompt))
     const data = { ...result, slug, difficulty: '通俗', createdAt: Date.now() }
     cacheConceptData(slug, data)
 
@@ -189,19 +197,59 @@ async function handleConceptClick({ slug, term }) {
   try { await loadConceptBySlug(slug) } catch (e) { loading.value = false }
 }
 
-async function handleContextMenuAsk(text) {
+async function handleContextMenuAsk(text, userPrompt) {
   const thread = activeThread.value
   if (!thread) return
+  console.log('[ConceptPage] handleContextMenuAsk:', text, 'userPrompt:', userPrompt?.length || 0, 'chars')
+
   const slug = generateSlug(text)
   const parentSlug = currentConcept.value?.slug || thread.rootSlug
+  const existing = getCachedConcept(slug)
+
+  if (existing?.content && userPrompt) {
+    console.log('[ConceptPage] handleContextMenuAsk: concept exists, regenerating with userPrompt')
+    navigateToSlug(slug)
+    currentConcept.value = { ...existing }
+    loading.value = true
+    markLoading(slug)
+    try {
+      const result = await fetchConcept(text, getFetchOptions(userPrompt))
+      const data = { ...result, slug, difficulty: '通俗', createdAt: Date.now() }
+      cacheConceptData(slug, data)
+      currentConcept.value = data
+      loading.value = false
+      persistConceptAsync(slug, data)
+    } catch (e) {
+      loading.value = false
+    } finally {
+      unmarkLoading(slug)
+    }
+    return
+  }
 
   addConceptToTree(parentSlug, slug, text)
   navigateToSlug(slug)
 
-  currentConcept.value = getCachedConcept(slug) || { title: text, slug }
+  currentConcept.value = existing || { title: text, slug }
   loading.value = true
   markLoading(slug)
-  try { await loadConceptBySlug(slug) } catch (e) { loading.value = false }
+  try { await loadConceptBySlug(slug, userPrompt) } catch (e) { loading.value = false }
+}
+
+function handleDeleteCurrentNode() {
+  const thread = activeThread.value
+  const slug = currentConcept.value?.slug
+  if (!thread || !slug || slug === thread.rootSlug) return
+  console.log('[ConceptPage] handleDeleteCurrentNode:', slug)
+
+  const path = getConceptPathToRoot(slug)
+  removeConceptFromTree(slug)
+
+  const parentSlug = path.length >= 2 ? path[path.length - 2] : thread.rootSlug
+  const cached = getCachedConcept(parentSlug)
+  currentConcept.value = cached || { title: parentSlug, slug: parentSlug }
+  navigateToSlug(parentSlug)
+  loading.value = false
 }
 
 async function handleRegenerate() {
@@ -380,9 +428,11 @@ async function handlePathNodeClick(slug) {
         <ContentView
           :concept="currentConcept"
           :loading="loading"
+          :deletable="isCurrentDeletable"
           @concept-click="handleConceptClick"
           @regenerate="handleRegenerate"
           @copy-content="handleCopyContent"
+          @delete-node="handleDeleteCurrentNode"
         />
         <ContextMenu @ask-sub="handleContextMenuAsk" />
       </main>

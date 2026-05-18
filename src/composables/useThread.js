@@ -39,6 +39,7 @@ export function useThread() {
       rootTitle,
       tree: { root: [rootSlug] },
       concepts: {},
+      quizzes: [],
       currentSlug: rootSlug,
       createdAt: Date.now(),
       updatedAt: Date.now(),

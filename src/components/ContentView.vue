@@ -2,13 +2,15 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 import RelatedConcepts from './RelatedConcepts.vue'
+import QuizCard from './QuizCard.vue'
 
 const props = defineProps({
   concept: { type: Object, default: null },
   loading: { type: Boolean, default: false },
+  deletable: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['concept-click', 'regenerate', 'copy-content'])
+const emit = defineEmits(['concept-click', 'regenerate', 'copy-content', 'delete-node'])
 
 const contentRef = ref(null)
 const fadeIn = ref(false)
@@ -141,6 +143,17 @@ function handleCopy() {
               </svg>
               重新生成
             </button>
+            <button
+              v-if="deletable"
+              class="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-colors"
+              :class="'text-red-400 hover:bg-red-500/10'"
+              @click="emit('delete-node')"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+              删除此概念
+            </button>
           </div>
 
           <div
@@ -153,6 +166,13 @@ function handleCopy() {
               @concept-click="(payload) => emit('concept-click', payload)"
             />
           </div>
+
+          <QuizCard
+            v-if="!loading && concept?.slug"
+            :concept-slug="concept.slug"
+            :concept-title="concept.title"
+            :concept-content="concept.content"
+          />
         </div>
       </div>
     </div>

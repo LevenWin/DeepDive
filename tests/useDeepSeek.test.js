@@ -86,7 +86,7 @@ describe('useDeepSeek', () => {
 
       const callArgs = global.fetch.mock.calls[0]
       const body = JSON.parse(callArgs[1].body)
-      expect(body.model).toBe('deepseek-chat')
+      expect(body.model).toBe('deepseek-v4-pro')
       expect(body.messages[1].content).toBe('概念：Kafka')
       expect(body.messages[0].content).toContain('机器学习')
     })

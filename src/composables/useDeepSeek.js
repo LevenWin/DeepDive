@@ -93,12 +93,18 @@ export function useDeepSeek() {
     const difficulty = options.difficulty || getDifficulty()
     const learningPath = getLearningPath()
     const parentSummary = options.parentSummary || ''
+    const userPrompt = options.userPrompt || ''
 
     const systemPrompt = buildSystemPrompt(learningPath, parentSummary)
+    const userContent = userPrompt
+      ? `概念：${conceptName}\n\n用户补充说明：${userPrompt}`
+      : `概念：${conceptName}`
+
     const seq = ++apiRequestSeq
     console.log(
       `🔄 [API #${seq}] "${conceptName}"` +
       ` | parentSummary: ${parentSummary.length}chars` +
+      ` | userPrompt: ${userPrompt.length}chars` +
       ` | prompt: ${systemPrompt.length}chars`,
     )
 
@@ -110,10 +116,10 @@ export function useDeepSeek() {
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: 'deepseek-v4-pro',
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: `概念：${conceptName}` },
+          { role: 'user', content: userContent },
         ],
         stream: false,
       }),
@@ -175,5 +181,87 @@ export function useDeepSeek() {
     }
   }
 
-  return { getApiKey, setApiKey, getDifficulty, setDifficulty, getLearningPath, fetchConcept }
+  async function fetchQuizGenerate(conceptName, content, count = 5) {
+    const apiKey = getApiKey()
+    if (!apiKey) throw new Error('API_KEY_MISSING')
+
+    const systemPrompt = `你是一位知识考核专家。请基于提供的概念内容，生成 ${count} 道选择题。
+
+要求：
+- 每道题 4 个选项，只有一个正确答案
+- 难度为中等，考察对概念的核心理解
+- 附带简短解析
+- 不要重复相似题目
+
+输出格式（严格遵守，不要包裹代码块）：
+---QUIZZES---
+[{"question":"题目","options":["A","B","C","D"],"correctIndex":0,"explanation":"解析"}]`
+
+    const seq = ++apiRequestSeq
+    console.log(`🔄 [API #${seq}] "Quiz: ${conceptName}" (flash) | count: ${count} | prompt: ${systemPrompt.length}chars`)
+
+    const t0 = performance.now()
+
+    const response = await fetchWithTimeout(API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'deepseek-v4-flash',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `概念：${conceptName}\n\n概念内容：\n${content.slice(0, 4000)}` },
+        ],
+        stream: false,
+      }),
+    })
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}))
+      throw new Error(err.error?.message || `API 请求失败: ${response.status}`)
+    }
+
+    const data = await response.json()
+    const body = data?.choices?.[0]?.message?.content
+    if (!body) throw new Error('API 返回数据异常')
+
+    const elapsed = (performance.now() - t0).toFixed(0)
+
+    const separator = '---QUIZZES---'
+    const sepIndex = body.indexOf(separator)
+    let quizzes = []
+
+    if (sepIndex !== -1) {
+      let jsonStr = body.slice(sepIndex + separator.length).trim()
+      jsonStr = jsonStr.replace(/```json\s*/gi, '').replace(/```\s*/g, '')
+      try {
+        quizzes = JSON.parse(jsonStr)
+        if (!Array.isArray(quizzes)) quizzes = []
+      } catch (e) {
+        console.warn('[API] parse quizzes JSON failed:', e.message)
+      }
+    } else {
+      try {
+        const cleaned = body.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
+        quizzes = JSON.parse(cleaned)
+        if (!Array.isArray(quizzes)) quizzes = []
+      } catch (e) {
+        console.warn('[API] fallback parse quizzes failed')
+      }
+    }
+
+    console.log(`✅ [API #${seq}] "Quiz: ${conceptName}" done in ${elapsed}ms | questions: ${quizzes.length}`)
+
+    return quizzes.map((q) => ({
+      question: q.question || '',
+      options: q.options || ['', '', '', ''],
+      correctIndex: typeof q.correctIndex === 'number' ? q.correctIndex : 0,
+      explanation: q.explanation || '',
+      difficulty: 'medium',
+    }))
+  }
+
+  return { getApiKey, setApiKey, getDifficulty, setDifficulty, getLearningPath, fetchConcept, fetchQuizGenerate }
 }
